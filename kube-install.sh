@@ -18,13 +18,14 @@ kubeadmyaml="/etc/kubernetes/kubeadm.yaml"
 kubeadmVersion="kubeadm.k8s.io/v1beta3"
 # Default kubeadmn
 k8sVersion="1.29.1"
-packageVersion=${k8sVersion%.*}
 # Use netbird
 netbird="false"
 # Default node ip and node name
 nodeIp=$(hostname -I | awk '{ print $1 }')
 nodeName=$(hostname)
 advertiseAddress=$nodeIp
+bindPort=6443
+curlinstall="curl https://raw.githubusercontent.com/daviddang91/kubeadm-install/main/kube-install.sh"
 
 # Disable Swap
 function disable-swap {
@@ -132,13 +133,15 @@ nodeRegistration:
     node-ip: "$nodeIp"
 localAPIEndpoint:
   advertiseAddress: ${nodeIp}
-  bindPort: 6443
+  bindPort: ${bindPort}
 certificateKey: ${certsKey}
 ---
 apiVersion: ${kubeadmVersion}
 kind: ClusterConfiguration
+featureGates:
+  EtcdLearnerMode: true
 kubernetesVersion: ${k8sVersion}
-controlPlaneEndpoint: ${advertiseAddress}:6443
+controlPlaneEndpoint: ${advertiseAddress}:${bindPort}
 apiServer:
   extraArgs:
     cloud-provider: "external"
@@ -156,13 +159,45 @@ EOF
     mkdir -p ${HOME}/.kube
     sudo cp -i /etc/kubernetes/admin.conf ${HOME}/.kube/config
     sudo chown $(id -u):$(id -g) .kube/config
-    echo  -e "${YELLOW} Please do not forget to join the other k8s nodes ${NC}"
 }
 
-# Join k8s worker
-# function join-k8s-worker() {
-
-# }
+function k8s-join() {
+    if [ -z "$bootstrap" ]; then
+        echo "mode join had no valid bootstrap token" >&2
+        usage
+    fi
+    if [ -z "$certsha" ]; then
+        echo "mode join had no valid CA certs shas" >&2
+        usage
+    fi
+    if [ -z "$certsKey" ]; then
+        echo "mode join had no valid certs encryption key" >&2
+        usage
+    fi
+cat > $kubeadmyaml <<EOF
+apiVersion: ${kubeadmVersion}
+kind: JoinConfiguration
+nodeRegistration:
+  name: "$nodeName"
+  criSocket: "$crisock"
+  kubeletExtraArgs:
+    cloud-provider: "external"
+    node-ip: "$nodeIp"
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: ${advertiseAddress}:${bindPort}
+    token: ${bootstrap}
+    caCertHashes:
+    - ${certsha}
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: ${nodeIp}
+    bindPort: ${bindPort}
+  certificateKey: ${certsKey}
+EOF
+    kubeadm join --config=$kubeadmyaml --ignore-preflight-errors=all
+    echo "Done."
+}
 
 # Install cni
 function install-cni {
@@ -185,8 +220,8 @@ function install-helm {
 	fi	
 }
 
-# Install K8s master
-function install-k8s-master() {
+# Preinstall kubeadm
+function preinstall_kubeadm() {
     echo -e "${GREEN} *** Please make sure inbound ports 6443,443,8080 are allowed *** ${NC}"
     sleep 3
     disable-swap
@@ -201,12 +236,35 @@ function install-k8s-master() {
         echo -e "${RED}Please check the logs and re-run this script${NC}"
         exit
     fi
+}
+
+# Install K8s master
+function install-k8s-master() {
+    preinstall_kubeadm
     install-kubeadm
     k8s-init
     install-cni
     install-helm
     echo -e "${GREEN}Now you can join the other nodes to the cluster with the join command below:${NC}"
-    kubeadm token create --print-join-command
+    echo
+    echo "To get the bootstrap information and CA cert hashes for another node, run:"
+    echo "   kubeadm token create --print-join-command"
+    echo
+    echo "Here are join commands:"
+    joincmd=$(kubeadm token create --print-join-command "$bootstrap")
+    if [ -z "$bootstrap" ]; then
+        bootstrap=$(echo ${joincmd} | awk '{print $5}')
+    fi
+    certsha=$(echo ${joincmd} | awk '{print $7}')
+    echo "control plane: ${curlinstall} "'|'" sh -s join -a ${advertiseAddress} -v ${k8sVersion} -b ${bootstrap} -s ${certsha} -e ${certsKey}"
+    echo "worker       : ${curlinstall} "'|'" sh -s worker -a ${advertiseAddress} -v ${k8sVersion} -b ${bootstrap} -s ${certsha}"
+}
+
+# Join k8s master
+function join-k8s-master() {
+    preinstall_kubeadm
+    install-kubeadm
+    k8s-join
 }
 
 # Reset K8s
@@ -317,6 +375,8 @@ while getopts ":h?:a:b:e:k:c:s:i:v:n:g:f:" opt; do
   esac
 done
 
+packageVersion=${k8sVersion%.*}
+
 # supported modes
 modes="init join worker reset"
 
@@ -337,7 +397,7 @@ case $mode in
         install-k8s-master
     ;;
     "join")
-        echo "Hello 2"
+        join-k8s-master
     ;;
     "worker")
         echo "Hello 3"
