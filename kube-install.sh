@@ -129,7 +129,6 @@ nodeRegistration:
   name: "$nodeName"
   criSocket: "$crisock"
   kubeletExtraArgs:
-    cloud-provider: "external"
     node-ip: "$nodeIp"
 localAPIEndpoint:
   advertiseAddress: ${nodeIp}
@@ -142,12 +141,6 @@ featureGates:
   EtcdLearnerMode: true
 kubernetesVersion: ${k8sVersion}
 controlPlaneEndpoint: ${advertiseAddress}:${bindPort}
-apiServer:
-  extraArgs:
-    cloud-provider: "external"
-controllerManager:
-  extraArgs:
-    cloud-provider: "external"
 networking:
   podSubnet: "10.244.0.0/16"
 EOF
