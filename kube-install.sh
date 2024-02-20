@@ -5,6 +5,7 @@
 #version     : 1.0
 #usage       : Please make sure to run this script as ROOT or with ROOT permissions
 #notes       : supports ubuntu OS 18.04/20.04/22.04
+#TODO        : need to follow up on this issue - https://github.com/kubernetes/kubeadm/issues/2997
 #==============================================================================
 NC='\033[0m'
 YELLOW='\033[0;33m'
@@ -17,7 +18,7 @@ kubeadmyaml="/etc/kubernetes/kubeadm.yaml"
 # kubeadm API version - in a single var so easy to update
 kubeadmVersion="kubeadm.k8s.io/v1beta3"
 # Default kubeadmn
-k8sVersion="1.29.1"
+k8sVersion="1.29.2"
 # Use netbird
 netbird="false"
 # Default node ip and node name
@@ -137,8 +138,6 @@ certificateKey: ${certsKey}
 ---
 apiVersion: ${kubeadmVersion}
 kind: ClusterConfiguration
-featureGates:
-  EtcdLearnerMode: true
 kubernetesVersion: ${k8sVersion}
 controlPlaneEndpoint: ${advertiseAddress}:${bindPort}
 networking:
@@ -151,10 +150,10 @@ EOF
     export KUBECONFIG=/etc/kubernetes/admin.conf
     mkdir -p ${HOME}/.kube
     sudo cp -i /etc/kubernetes/admin.conf ${HOME}/.kube/config
-    sudo chown $(id -u):$(id -g) .kube/config
+    sudo chown $(id -u):$(id -g) ${HOME}/.kube/config
 }
 
-function k8s-join() {
+function k8s-master() {
     if [ -z "$bootstrap" ]; then
         echo "mode join had no valid bootstrap token" >&2
         usage
@@ -174,7 +173,6 @@ nodeRegistration:
   name: "$nodeName"
   criSocket: "$crisock"
   kubeletExtraArgs:
-    cloud-provider: "external"
     node-ip: "$nodeIp"
 discovery:
   bootstrapToken:
@@ -192,10 +190,41 @@ EOF
     echo "Done."
 }
 
+function k8s-worker() {
+    if [ -z "$bootstrap" ]; then
+        echo "mode worker had no valid bootstrap token" >&2
+        usage
+    fi
+    if [ -z "$certsha" ]; then
+        echo "mode worker had no valid certs address" >&2
+        usage
+    fi
+cat > $kubeadmyaml <<EOF
+apiVersion: ${kubeadmVersion}
+kind: JoinConfiguration
+nodeRegistration:
+  criSocket: "$crisock"
+  kubeletExtraArgs:
+    node-ip: "$nodeIp"
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: ${advertiseAddress}:${bindPort}
+    token: ${bootstrap}
+    caCertHashes:
+    - ${certsha}
+EOF
+    kubeadm join --config=$kubeadmyaml
+    echo "Done."
+}
+
 # Install cni
 function install-cni {
     echo  -e "${GREEN} Deploying the Flannel Network Plugin..${NC}"
-    kubectl apply -f https://raw.githubusercontent.com/daviddang91/kubeadm-install/main/flannel-netbird.yml
+    if [ "${netbird}" == "true" ]; then
+        kubectl apply -f https://raw.githubusercontent.com/daviddang91/kubeadm-install/main/flannel-netbird.yml
+    else
+       kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
+    fi
     sleep 120
     kubectl wait pods -n kube-flannel  -l app=flannel --for condition=Ready --timeout=180s
 }
@@ -257,7 +286,14 @@ function install-k8s-master() {
 function join-k8s-master() {
     preinstall_kubeadm
     install-kubeadm
-    k8s-join
+    k8s-master
+}
+
+# Join k8s worker
+function join-k8s-worker() {
+    preinstall_kubeadm
+    install-kubeadm
+    k8s-worker
 }
 
 # Reset K8s
@@ -326,8 +362,9 @@ function usage() {
 ###START HERE###
 mode="$1"
 shift
+netbird="false"
 
-while getopts ":h?:a:b:e:k:c:s:i:v:n:g:f:" opt; do
+while getopts ":h?:a:b:e:k:c:s:i:v:n:g:f:t:" opt; do
   case $opt in
     h|\?)
         usage
@@ -365,6 +402,9 @@ while getopts ":h?:a:b:e:k:c:s:i:v:n:g:f:" opt; do
     n)
         nodeName=$OPTARG
         ;;
+    t)
+        netbird="true"
+        ;;
   esac
 done
 
@@ -393,7 +433,7 @@ case $mode in
         join-k8s-master
     ;;
     "worker")
-        echo "Hello 3"
+        join-k8s-worker
     ;;
     "reset")
         reset-k8s
